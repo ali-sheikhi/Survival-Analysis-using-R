@@ -1,0 +1,710 @@
+
+---
+
+title: "Experimental Study of Recidivism using Survival Analyisis"
+author: "Yassine El Khattabi, Hanna Abi Akl, Ali Sheikhi"
+date: "May 02, 2019"
+output: word_document
+
+---
+
+
+
+
+
+
+
+## Project outline and dataset
+
+The data is from an experimental study of recidivism of 432 male prisoners, who were observed for a year after being released from prison (Rossi et al., 1980). The interest of this project is to conduct a survival analyis of the released prisoners where the notion of survival is drawn from the number of weeks from time of release until a reoffence. Here, an arrest within the observed year is considered to be an event. Our work begins with exploratory data analysis which will help us in our attempt to model the relationship, if any, between the covariates and the occurrence of an event.
+
+The following variables are included in the data:
+
+* week: week of arrest after release, or censoring time
+* arrest: the event indicator, 1 = arrested , 0 = not
+* fin: 1 = received financial aid, 0 = not
+* age: in years at the time of release
+* race: 1 = black, 0 = others
+* wexp: 1 = had full-time work experience, 0 = not
+* mar: 1 = married, 0 = not
+* paro: 1 = released on parole, 0 = not
+* prio: number of prior convictions
+* educ: codes 2 (grade 6 or less), 3 (grades 6 through 9), 4 (grades 10 and 11),
+5 (grade 12), or 6 (some post-secondary)
+* emp1 - emp52: 1 = employed in the corresponding week, 0 = not
+
+
+## Exploratory Data Analysis
+
+We load the necessary packages:
+```{r}
+library(tidyverse)
+library(readr)
+library(survival)
+library(survivalROC)
+library(glmnet)
+library(survminer)
+library(reshape)
+```
+
+Looking at the summary of the data we notice that only 26.39% of the subjects get arrested. This corresponds to a low number of events for this dataset and typically we want this number to be higher since it would result in a more representative model, nevertheless we decided to use this dataset as we found the added challenge interesting. One more thing worth noting is that while the median and the 3rd quartile for "prio" stand at 2.984 and 4 respectively, the maximum value is 18. This could be a possible indication of an outlier but we need to confirm this.
+
+```{r}
+dat <-
+   read.csv2("prison.csv", sep = "", header = TRUE)
+summary(dat[,1:10])
+
+```
+
+A first look at the dataset (excluding cols emp1-52):
+```{r}
+head(dat[,1:10])
+```
+
+Variables correspoding to `financial aid`, `race`, `work experience`, `married` and `parole` are **categorical** and need to be defined as factors in R:
+
+```{r}
+df <- mutate(dat, 
+            fin  = factor(fin,  levels = c('1', '0'), labels = c('financed', 'not_financed')),
+            race = factor(race, levels = c('1', '0'), labels = c('black', 'other')),
+            wexp = factor(wexp, levels = c('1', '0'), labels = c('full_time', 'not_full_time')),
+            mar  = factor(mar,  levels = c('1', '0'), labels = c('married', 'single')),
+            paro  = factor(paro, levels = c('1', '0'), labels = c('parole', 'not_parole'))
+)
+
+str(df[,1:10])
+
+```
+
+
+The folowing is a distribution of the priors. We conclude that there are no outliers as such since the number of priors are decreasing exponentially.
+
+```{r}
+ggplot(df, aes(x=prio)) + geom_histogram(breaks=seq(0, 50, by =2), col="grey", aes(fill=..count..))  + ggtitle("Distribution of Priors")
+```
+
+
+As mentioned earlier, 26.39% of the subjects are arrested within the year and those that weren't arrested made it throught the whole year. From the following we can confirm that there are no individuals that were not arrested and for some reason didn't reach the end of the year.
+
+```{r}
+prop.table(table(df$arrest == 1))
+prop.table(table(df$week <= 52 & df$arrest != 1))
+```
+
+In order to get an idea of the distibution of 'time to event' we can plot the histogram for the `week` column for those that were arrested. Most subjects reach week 52 and so we have omitted this from the histogram to get a clearer picture. There isn't much that can be said except that for the first 7 weeks there is a visible effort to stay out of trouble.
+
+```{r}
+ggplot(df[df$arrest == 1,], aes(x=week)) + geom_histogram(breaks=seq(0, 52, by =1), col="grey", aes(fill=..count..))  + ggtitle("Distribution freedom duration")
+```
+
+
+
+## Prepare data for Survival Analysis
+
+Survival analysis in R requires that the target or the response composite variable be defined as a 'Surv' object. Thus, we create the Surv object 'y' from columns `week` and `arrest`. The covariates being considered do not include columns emp1-52. We suspect that information contained within emp1-52, such as 'weeks until arrest' or 'week prior to arrest employment status', will significantly improve the final model, unfortunately we cannot use this since we shall not avail the model of these columns in the test set.
+
+```{r}
+y <- Surv(df$week, df$arrest)
+x <- df[,3:10]
+
+```
+
+The data is split randomly into a training and a testing set (80% / 20%)
+```{r}
+set.seed(1234)
+
+train.size <- 0.8
+
+i.training <- sample(nrow(x), size = as.integer(432*train.size), replace = FALSE)
+i.testing <- setdiff(seq_len(nrow(x)), i.training)
+
+x.training <- x[i.training,, drop = FALSE]
+y.training <- y[i.training,, drop = FALSE]
+
+x.testing <- x[i.testing,, drop = FALSE]
+y.testing <- y[i.testing,, drop = FALSE]
+
+```
+
+
+## Kaplan-Meier
+
+Kaplan-Meier is a powerful non-parametric method to estimate the survival curve. A survfit object is created from the number at risk and number of events at each possible arrest time.
+
+
+
+```{r}
+fit.KM <- survfit(y.training ~ 1, data = x.training)
+fit.KM
+
+```
+Note that the median is NA. This is to be expected because the survival at the end of the experiment is 74% so we never encounter the 50% survival rate during the experiment time.
+
+Another thing to notice is that the ratio of the arrests (90/345 = 0.26) is still 26% after the train-test split. This confirms that the split has been done correctly.
+
+
+
+
+Next we plot the survival curve. It can be seen that the survival rate, or in this case the probability of not getting arrested, decreases over time in an almost linear fashion. 
+
+Note that, as expected, the ratio of survival at the end of the experiment is **0.74**.
+Using **censor** parameter gives a single mark at the end of the experiment, which is logical given that all the censoring is happenning at week 52.
+
+```{r}
+
+ggsurvplot(fit.KM, data = x.training, title = "Kaplan-Meier estimator",
+     ylab = "Survival probability",
+     xlab = "Time (weeks)",
+     censor.shape="|", censor.size = 4)
+
+fit.KM
+```
+
+The next step is to plot the effects of the different categorical covariates on the survival curve.
+
+The following are plots for the 5 categorical variables:
+
+* Financial Aid
+
+```{r}
+fit.KMfin <- survfit(y.training ~ fin, data = x.training)
+
+ggsurvplot(
+  fit.KMfin,
+  title = "Survival Curve based on Financial Aid",
+  size = 1,                 # change line size
+  palette = 
+    c("#003366", "#FF0000"),# custom color palettes
+  conf.int = TRUE,          # Add confidence interval
+  pval = TRUE,              # Add p-value
+  risk.table = TRUE,        # Add risk table
+  risk.table.col = "strata",# Risk table color by groups
+  legend.labs = 
+    c("Financial Aid", "No Financial Aid"),    # Change legend labels
+  risk.table.height = 0.25, # Useful to change when you have multiple groups
+  ggtheme = theme_bw()      # Change ggplot2 theme
+)
+```
+
+
+
+* Marital Status
+```{r}
+fit.KMmar <- survfit(y.training ~ mar, data = x.training)
+
+ggsurvplot(
+  fit.KMmar,
+  title = "Survival Curve based on Marital Status",
+  size = 1,                 # change line size
+  palette = 
+    c("#003366", "#FF0000"),# custom color palettes
+  conf.int = TRUE,          # Add confidence interval
+  pval = TRUE,              # Add p-value
+  risk.table = TRUE,        # Add risk table
+  risk.table.col = "strata",# Risk table color by groups
+  legend.labs = 
+    c("Married", "Single"),    # Change legend labels
+  risk.table.height = 0.25, # Useful to change when you have multiple groups
+  ggtheme = theme_bw()      # Change ggplot2 theme
+)
+```
+
+
+
+* Race
+
+```{r}
+fit.KMrace <- survfit(y.training ~ race, data = x.training)
+
+ggsurvplot(
+  fit.KMrace,
+  title = "Survival Curve based on Race",
+  size = 1,                 # change line size
+  palette = 
+    c("#003366", "#FF0000"),# custom color palettes
+  conf.int = TRUE,          # Add confidence interval
+  pval = TRUE,              # Add p-value
+  risk.table = TRUE,        # Add risk table
+  risk.table.col = "strata",# Risk table color by groups
+  legend.labs = 
+    c("Black", "Others"),    # Change legend labels
+  risk.table.height = 0.25, # Useful to change when you have multiple groups
+  ggtheme = theme_bw()      # Change ggplot2 theme
+)
+```
+
+
+* Full Time Work experience
+
+```{r}
+fit.KMwexp <- survfit(y.training ~ wexp, data = x.training)
+
+ggsurvplot(
+  fit.KMwexp,
+  title = "Survival Curve based on Full Time Work Experience",
+  size = 1,                 # change line size
+  palette = 
+    c("#003366", "#FF0000"),# custom color palettes
+  conf.int = TRUE,          # Add confidence interval
+  pval = TRUE,              # Add p-value
+  risk.table = TRUE,        # Add risk table
+  risk.table.col = "strata",# Risk table color by groups
+  legend.labs = 
+    c("Full Time Work Experience", "None"),    # Change legend labels
+  risk.table.height = 0.25, # Useful to change when you have multiple groups
+  ggtheme = theme_bw()      # Change ggplot2 theme
+)
+```
+
+
+* Parole
+
+```{r}
+fit.KMparo <- survfit(y.training ~ paro, data = x.training)
+
+ggsurvplot(
+  fit.KMparo,
+  title = "Survival Curve based on Parole Release",
+  size = 1,                 # change line size
+  palette = 
+    c("#003366", "#FF0000"),# custom color palettes
+  conf.int = TRUE,          # Add confidence interval
+  pval = TRUE,              # Add p-value
+  risk.table = TRUE,        # Add risk table
+  risk.table.col = "strata",# Risk table color by groups
+  legend.labs = 
+    c("Parole Release", "Not on  Parole Release"),    # Change legend labels
+  risk.table.height = 0.25, # Useful to change when you have multiple groups
+  ggtheme = theme_bw()      # Change ggplot2 theme
+)
+
+```
+
+
+
+Conclusion: Given the Kaplan-Meier plots, it seems that only `Marital Status` and `Work Experiece` may have an effect on the survival curve.
+
+
+We can investigate further with the logrank test for each of the 5 categorical covariates:
+
+```{r}
+fit.logrankfin <- survdiff(y.training ~ fin, data = x.training)
+fit.logrankfin
+
+fit.logrankmar <- survdiff(y.training ~ mar, data = x.training)
+fit.logrankmar
+
+fit.logrankrace <- survdiff(y.training ~ race, data = x.training)
+fit.logrankrace
+
+fit.logrankwexp <- survdiff(y.training ~ wexp, data = x.training)
+fit.logrankwexp
+
+fit.logrankparo <- survdiff(y.training ~ paro, data = x.training)
+fit.logrankparo
+
+```
+
+
+Conclusion: Work Experience is the only one that has a significant effect on the survival rate judging by the p-value of the test.
+
+
+## ANoVA - nested model candidates and comparison
+
+The purpose here is to find the best model with the minimum complexity that describes and predicts the occurence of the event in this study. Anova offers a way to compare nested models and thus the model of interest shall be the one with minimum covariates without significant loss in performance.
+
+In this section we create the following models:  
+
+* `M.total` is the global model that contains all the covariates
+
+* `M.0`is the model with no covariate ( the assumption is that there is no link between the event occurence and the covariates that we have)
+
+* `M.prio`, `M.age`, `M.mar`, `M.fin`, `M.wexp` and `M.educ` are models containing one covariate each, as indicated by the model names, that are going to be compared to the `M.0`and `M.total` models
+
+```{r}
+M.0     <- coxph(y.training ~ 1, data = x.training)
+M.prio  <- coxph(y.training ~ prio, data = x.training)
+M.age   <- coxph(y.training ~ age , data = x.training)
+M.mar   <- coxph(y.training ~ mar , data = x.training)
+M.fin   <- coxph(y.training ~ fin , data = x.training)
+M.wexp   <- coxph(y.training ~ wexp , data = x.training)
+M.educ    <- coxph(y.training ~ educ , data = x.training)
+M.total <- coxph(y.training ~ fin + age + race + wexp + mar + paro + prio + educ,data = x.training)
+
+```
+
+
+After creating the models, let's start by trying to identify which of our single-covariate model is the best in comparison to the empty model:
+
+```{r}
+
+anova(M.0, M.prio)
+print('_______________________________________________________________________________')
+
+anova(M.0, M.age)
+print('_______________________________________________________________________________')
+
+anova(M.0, M.mar)
+print('_______________________________________________________________________________')
+
+anova(M.0, M.fin)
+print('_______________________________________________________________________________')
+
+anova(M.0, M.wexp)
+print('_______________________________________________________________________________')
+
+anova(M.0, M.educ)
+
+
+```
+
+Anaysing the results above, we can say that if we have to chose only one covariate, the most significant one would be `age` in comparison to the empty model.
+
+Let's now compare `M.age` to a model with `age` + another covariate. For that we need to create the following models: 
+
+```{r}
+M.age.prio  <- coxph(y.training ~ age + prio, data = x.training)
+M.age.mar   <- coxph(y.training ~ age + mar , data = x.training)
+M.age.fin   <- coxph(y.training ~ age + fin , data = x.training)
+M.age.wexp   <- coxph(y.training ~ age + wexp , data = x.training)
+M.age.educ   <- coxph(y.training ~ age + educ , data = x.training)
+
+
+```
+
+
+Now let's see which of these is best in comparison to `M.age`:
+
+```{r}
+anova(M.age , M.age.prio)
+print('_______________________________________________________________________________')
+
+anova(M.age  , M.age.mar)
+print('_______________________________________________________________________________')
+
+anova(M.age , M.age.fin)
+print('_______________________________________________________________________________')
+
+anova(M.age , M.age.wexp)
+print('_______________________________________________________________________________')
+
+
+anova(M.age , M.age.educ)
+
+```
+
+From the results above, we can see that the best model with 2 covariates in comparison to `M.age` is `M.age.prio`
+
+
+Let's see how the model  `M.age.prio` is doing in comparison to `M.total`
+
+```{r}
+anova(M.age.prio  , M.total)
+```
+
+The difference is not significant (i.e. the p-value is big, and the loglik diffrence is not that important).
+
+In conclusion, using the nested model comparison with anova, the best model is `M.age.prio`.
+
+
+
+## Comparing non-nested models using the AIC metric
+
+AIC is a metric that enable us to compare different models even if they are not nested.
+
+```{r}
+fits <- list(M.prio = M.prio, M.age = M.age, M.mar = M.mar, M.wexp = M.wexp , M.educ = M.educ,
+             M.age.fin = M.age.fin ,M.age.prio = M.age.prio, M.age.wexp = M.age.wexp, M.age.educ = M.age.educ,
+             M.age.mar = M.age.mar, M.total = M.total)
+sapply(fits, AIC)
+
+```
+
+As suspected, the best AIC model is `M.age.prio`.
+
+
+
+## Automatic model selection based on AIC
+
+Alternatively and more conveniently, We can use the automatic selection using the function `step`:
+```{r}
+MAIC <- step(M.total)
+summary(MAIC)
+
+```
+
+Once again, the model selected at the end is the one related to `age` and `prio`.
+
+```{r}
+MAIC
+```
+
+
+
+# Further Analysis
+
+## Case deletion residuals
+
+The purpose of this analysis is to understand the effect of each sample on the values of the model coefficients (or betas) pertaining to `MAIC`. If we have an extreme value for a given sample, that means it has a big influence on the coefficients and can be considered as an outlier.
+
+```{r}
+res <- data.frame(matrix(ncol = 1, nrow = as.integer(432*train.size)))
+
+dfbetas <- residuals(MAIC, type = 'dfbetas')
+res$MAICcdr <- sqrt(rowSums(dfbetas^2))
+
+ggplot(aes(x = as.numeric(row.names(res)), y = MAICcdr), data = res) +
+  geom_bar(fill="#DD8888",stat = 'identity') +
+  labs(x='Index', y='Residuals') +
+  ggtitle("Case Deletion Residuals")
+
+
+```
+
+Here we do not see any outliers. We can say though that we have two kinds of samples: the one with big values for residuals and the one with small values. Our guess is that the big values are related to the samples experiencing an event of arrest. These are the source of "information" for the model. Since in our dataset only few samples experience the event **arrest** (about 26%), it is logical that they appear with significant values of residuals because if we supress any of them we lose a significant amount of information.
+
+
+# MAIC residuals
+
+In order to have a better idea about how good our model fits the data, i.e `age` and `prio` explains sufficently the risk for this problem, we can compute Martingale residuals for our model named `MAIc`.
+
+```{r}
+
+res$MAICmartins <- residuals(MAIC, type = "martingale")
+
+```
+
+
+Let us now plot the residuals:
+
+```{r}
+par(mfrow = c(1, 2), mar = c(4.2, 2, 2, 2))
+
+
+ggplot(data=x.training,aes(x=prio, y=res$MAICmartins)) + 
+  geom_point(size=2) + geom_smooth() + 
+  ggtitle("Martingale Residuals with respect to Priors") +
+  labs(x='Prior', y='Martingale Residuals')
+  
+ggplot(data=x.training,aes(x=age, y=res$MAICmartins)) + 
+  geom_point(size=2) + geom_smooth() +
+  ggtitle("Martingale Residuals with respect to Age") +
+  labs(x='Age', y='Martingale Residuals')
+  
+
+```
+
+
+From the cloud of points in the plots of residuals against age and prio, the following remarks can be drawn:
+* There is no real trend that suggests to add another form of the covariate (we can debate that for `prio`, the form of the line is quadratic but we do not consider it as a strong trend)
+* There appears to be 2 clusters of similar number of points in the 2 plots. A suggestion might be to conduct stratified analysis by a binary covariate. Since the number of points in both clusters seem to be similar, the stratification covariates that we can consider are either `wexp`(work experience) or `fin` (financial aids)
+
+## Schoenfeld residuals
+
+In this part, we want to test if the Hazard (i.e. risk of being arrested) in relation to the time, is proportional to the covariate we selected. For this we use `cox.zph()` function applied to our model `MAIC`:
+
+```{r}
+residual.sch <- cox.zph(MAIC)
+residual.sch
+
+```
+```{r}
+ggcoxzph(residual.sch, resid = TRUE, se = TRUE, df = 4, nsmo = 40, var=c("age", "prio"),
+  point.col = "red", point.size = 1, point.shape = 19, point.alpha = 1,
+  caption = NULL, ggtheme = theme_survminer())
+```
+In the plots, thanks to the smoothed line, we can see that the effect of `age`and `prio `is decreasing with time. The P-value in cox.zph test suggest that this is true in particular for `age`.
+
+
+
+# Penalized cox regression
+
+In the previous sections, we tried to build a model manually. We starting by using Kaplan-Mayer and Logrank test to have an idea about the most significant covariates, then using Anova we compared nested models and we found out that  `prio`and `age` are the most significant covariates.
+
+We obtained the same results using the AIC creterion for an automatic model selection thanks to `step` function. 
+
+We started by the model with all covariates `M.full` and the reverse step enabled us to have a final model with the covariates `age` and `prio`.
+
+For this part, we are going to use `glmnet` in order to be able take advantage of penalization and cross validation to select the model with the best tradeoff between good fitness and complexity.
+
+## Creating the `glmnet` model
+
+### Data preprocessing
+TO be able to use glmnet, we need to format our data as a matrix. We will do this for `x.training` and `x.testing`:
+
+```{r}
+xmat.training <-  data.matrix(x.training, rownames.force = NA)
+xmat.testing <-  data.matrix(x.testing, rownames.force = NA)
+```
+
+Let's fit the model using `cox`family:
+
+```{r}
+M.glm <- glmnet(xmat.training, y.training, family = "cox")
+beta=coef(M.glm)
+
+tmp <- as.data.frame(as.matrix(beta))
+tmp$coef <- row.names(tmp)
+tmp <- reshape::melt(tmp, id = "coef")
+tmp$variable <- as.numeric(gsub("s", "", tmp$variable))
+tmp$lambda <- M.glm$lambda[tmp$variable+1] # extract the lambda values
+tmp$norm <- apply(abs(beta[-1,]), 2, sum)[tmp$variable+1] # compute L1 norm
+
+# x11(width = 13/2.54, height = 9/2.54)
+ggplot(tmp[tmp$coef != "(Intercept)",], aes(norm, value, color = coef, linetype = coef)) + 
+    geom_line() + 
+    xlab("L1 norm") + 
+    guides(color = guide_legend(title = ""), 
+           linetype = guide_legend(title = "")) +
+    theme_bw() + 
+    theme(legend.key.width = unit(3,"lines"))
+
+```
+The plot above explains the effect of penalization, in this case an elastic combination of Ridge and Lasso by default, on the number of selected covariates.
+
+
+# Selecting a threshold through cross-validation
+The `glmnet` function allows us to identify the best model using as its metric the `Partial Likelihood Deviance`
+
+```{r}
+set.seed(1234)
+M.cv10 <- cv.glmnet(xmat.training, y.training, family = "cox")
+plot(M.cv10,  sub="\nCV Elastic Net: Number of Nonzero (Active) Coefficients")
+
+```
+
+From the plot, the minimum error is obtained with the model using 4 covariates. Here we can not select the model with `lambda.1se` error because it is higher than the maximal error. 
+
+Let's retrieve the coefficients of the model with `lambda.min` error instead.
+
+
+```{r}
+b <- coef(M.cv10, s = "lambda.min")
+b.enet <- b[b!=0]
+names(b.enet) <- colnames(x)[as.logical(b != 0)]
+b.enet
+```
+The covariates selected by `cv.glmnet`are `prio`, `age`, `wexp` and `educ`. This is in coherence with the foundings of the previously used methods, in paricular the `MAIC`.
+
+Another feature of using `glmnet` is that it enables us to make predictions. We need to note that here predict will only give a score proportional to the hazard.
+
+Let's make the prediction on the testing
+
+# Test the model
+```{r}
+score.testing <- predict(M.cv10, newx = xmat.testing, s = "lambda.min")
+score.testing <- score.testing / IQR(score.testing)
+```
+
+Here we normalize the predicted score as a good practice
+
+TO be able to assess the quality of hazard prediction by our model, we can use cox regression to measure the proprtionality of the scores we predicted in relation to the surv object of our testing data.
+
+```{r}
+summary(coxph(y.testing ~ score.testing))
+```
+
+The P value of the test is close to 5% (slightly higher) but we can consider it as a positive sign for the quality of the predictions on the testing set.
+
+Furthermore, inorder to be able to use logrank test, we can create a categorical variable using a cut-off threshold on our predictions.
+Here we chose the 3rd quartile as a cut-off knowing that 26% of our samples have experienced the event arrest.
+
+```{r}
+x_risk <- ifelse(score.testing <= quantile(score.testing)[4], "low", "high")
+table(x_risk)
+
+```
+
+
+```{r}
+
+fit.KM.x_risk <- survfit(y.testing ~ x_risk, conf.type = "log-log")
+ggsurvplot(
+  fit.KM.x_risk,
+  data = x.testing,
+  size = 1,                 # change line size
+  palette = 
+    c("#003366", "#FF0000"),# custom color palettes
+  conf.int = TRUE,          # Add confidence interval
+  pval = TRUE,              # Add p-value
+  risk.table = TRUE,        # Add risk table
+  risk.table.col = "strata",# Risk table color by groups
+      # Change legend labels
+  risk.table.height = 0.25, # Useful to change when you have multiple groups
+  ggtheme = theme_bw()      # Change ggplot2 theme
+)
+
+```
+
+In assessing the effect of the binary encoded transformation of our predictions (i.e. "high" and "low") on the survival curve of the testing data we find the P-Value to be significant.
+
+```{r}
+LR <- survdiff(y.testing ~ x_risk)
+LR
+```
+From the logrank test, we see that the p-value is significant, this is also a good sign that the split we made makes sense and the model made reasonable predictions.
+
+## CCP model
+
+As a final model, we are creating the CCP model which is basicaly just stacking the estimated coxph coefficients computed for each single covariate in their own respective models.
+So we build this model taking in account all the covariates.
+
+```{r}
+fits <- plyr::adply(xmat.training, 2, function(x) broom::tidy(coxph(y.training ~ x)))
+b.CCP <- with(fits, structure(estimate, names = as.character(X1)))
+```
+
+## Evaluation of models and conclusion
+
+Here we retrieve the coefficients of all the models of interest previously described to make predictions on the testing set:
+```{r}
+b.total <- coef(M.total)
+b.MAIC      <- coef(MAIC)
+
+names(b.MAIC) = c("age","prio")
+names(b.total)  = c("fin", "age", "race", "wexp" ,"mar", "paro", "prio", "educ")
+models_coefficients <- tibble(
+  method = c("manual", "Anova-aic", "elasticNet", "ccp"),
+  coefficients = list(b.total, b.MAIC, b.enet, b.CCP)
+)
+
+```
+
+
+The following code is creating a function that makes the predictions through a linear combination of each model's coefficents with the values of covariates for each sample.
+```{r}
+lincom <- function(b, X) rowSums(sweep(X[, names(b), drop = FALSE], 2, b, FUN = "*"))
+
+```
+
+Let's predict and compare the quality of predictions using the cox regression between the ground truth surv object and the standardized predicted score related to the hazard.
+
+```{r}
+models_performance <- mutate(models_coefficients,
+                             predictions = map(coefficients, ~ lincom(., xmat.testing)),
+                             cox_obj = map(predictions, ~ coxph(y.testing ~ I(. / sd(.)))),
+                             cox_tab = map(cox_obj, broom::tidy)
+) %>%
+  unnest(cox_tab)
+
+models_performance
+
+
+```
+
+From the table below, the best model seems to be the total model. This is not surprising giving the fact that we used all the covariates.
+
+The second best model is CCP, which indicates that the approach gives some descent results with minimal effort.
+Comparing the rest of the models, we can see that `Anova-aic` (named as such since both Anova and MAIC resulted in the same 2 covariates) is better than `elasticNet` with less complexity ( 2 coefficients instead of 4).
+
+```{r}
+models_performance <- mutate(models_performance,
+                             AUC = map_dbl(predictions, ~ survivalROC::survivalROC(y.testing[, 1], y.testing[, 2], ., predict.time = 52, method = "KM")$AUC)
+) %>%
+  select(method, estimate, std.error, p.value, AUC)
+models_performance
+```
+
+Using the AUC metrics, the same conclusion is obtained here.
+
+__**Conclusion**__: Initially, preliminary insights into the potential significance of the existing categorical covariates in our dataset were obtained through the Kaplan-Meier and Logrank tests. In this case, we found full-time work experience (`wexp`) to be the only determined as important by both tests. Next, a carefully designed series of comparisons of nested models using ANoVA further strengthened and shaped our assumptions. The resulting best model from this procedure had as predictor variables `prio` and `age`. Moreover, the significance of these two covariates was confirmed by the subsequent AIC-metric based `MAIC` model using automatic reverse-step covariate selection, since the final model had precisely the same two variables. Our `glmnet` model with complexity regularization facilitated by Lasso-Ridge penalty consisted of four covariates, namely, `prio`, `age`, `wexp` and `educ`. These were consistent with our previous findings, with the exception of `educ`. Finally, after creating the `CCP` model, and using the full model as a reference we compare and evaluate all of them.
